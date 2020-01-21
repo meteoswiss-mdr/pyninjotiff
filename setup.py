@@ -31,7 +31,7 @@ version = imp.load_source('pyninjotiff.version', 'pyninjotiff/version.py')
 
 setup(name="pyninjotiff",
       version=version.__version__,
-      description='Pytroll imaging library',
+      description='Python Ninjo TIFF writing library',
       author='Martin Raspaud',
       author_email='martin.raspaud@smhi.se',
       classifiers=["Development Status :: 5 - Production/Stable",
@@ -44,6 +44,6 @@ setup(name="pyninjotiff",
       url="https://github.com/pytroll/pyninjotiff",
       packages=['pyninjotiff'],
       zip_safe=False,
-      install_requires=['numpy >=1.6', 'six'],
+      install_requires=['numpy >=1.6', 'six', 'pyproj', 'pyresample'],
       # test_suite='pyninjotiff.tests.suite',
       )

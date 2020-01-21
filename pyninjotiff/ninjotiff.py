@@ -34,6 +34,7 @@ distributed consistent with their licensing terms.
 Edited by Christian Kliche (Ernst Basler + Partner) to replace pylibtiff with
 a modified version of tifffile.py (created by Christoph Gohlke)
 """
+
 from __future__ import division
 from __future__ import print_function
 
@@ -48,16 +49,16 @@ import numpy as np
 from pyproj import Proj
 from pyresample.utils import proj4_radius_parameters
 
-#import mpop.imageo.formats.writer_options as write_opts
 from pyninjotiff import tifffile
 
 log = logging.getLogger(__name__)
 
-#-------------------------------------------------------------------------
+
+# -------------------------------------------------------------------------
 #
 # Ninjo tiff tags from DWD
 #
-#-------------------------------------------------------------------------
+# -------------------------------------------------------------------------
 # Geotiff tags.
 GTF_ModelPixelScale = 33550
 GTF_ModelTiepoint = 33922
@@ -125,12 +126,34 @@ MODEL_PIXEL_SCALE_COUNT = int(os.environ.get(
     "GEOTIFF_MODEL_PIXEL_SCALE_COUNT", 3))
 
 
-#-------------------------------------------------------------------------
+# -------------------------------------------------------------------------
 #
 # Read Ninjo products config file.
 #
-#-------------------------------------------------------------------------
-def get_product_config(product_name, force_read=False):
+# -------------------------------------------------------------------------
+def get_writer_config(config_fname, prod, single_product_config, scn_metadata):
+    """Writer_config function for Trollflow_sat: calls the get_product_config function.
+
+    :Parameters:
+       config_fname: str
+            Name of the Ninjo product configuration file
+
+       prod: str
+            Name of Ninjo product.
+
+       single_product_config: dict
+            config params for the current product
+
+       scn_metadata: dict
+            Satpy satellite data
+    """
+    ninjo_product = prod
+    if 'ninjo_product_name' in single_product_config:
+        ninjo_product = single_product_config['ninjo_product_name']
+    return get_product_config(ninjo_product, True, config_fname)
+
+
+def get_product_config(product_name, force_read=False, config_filename=None):
     """Read Ninjo configuration entry for a given product name.
 
     :Parameters:
@@ -147,73 +170,94 @@ def get_product_config(product_name, force_read=False):
         * As an example, see *ninjotiff_products.cfg.template* in
           MPOP's *etc* directory.
     """
-    return ProductConfigs()(product_name, force_read)
+    return ProductConfigs()(product_name, force_read, config_filename)
 
 
 class _Singleton(type):
 
-    def __init__(cls, name_, bases_, dict_):
-        super(_Singleton, cls).__init__(name_, bases_, dict_)
-        cls.instance = None
+    def __init__(self, name_, bases_, dict_):
+        """Init the singleton."""
+        super(_Singleton, self).__init__(name_, bases_, dict_)
+        self.instance = None
 
-    def __call__(cls, *args, **kwargs):
-        if cls.instance is None:
-            cls.instance = super(_Singleton, cls).__call__(*args, **kwargs)
-        return cls.instance
+    def __call__(self, *args, **kwargs):
+        """Call the singleton."""
+        if self.instance is None:
+            self.instance = super(_Singleton, self).__call__(*args, **kwargs)
+        return self.instance
 
 class ProductConfigs(object):
-    __metaclass__ = _Singleton
 # class ProductConfigs(object, metaclass=_Singleton): # suggestion by python 2to3 algorithm 
+    """Product config."""
+    __metaclass__ = _Singleton  # noqa
+
     def __init__(self):
+        """Init the product config."""
         self.read_config()
 
-    def __call__(self, product_name, force_read=False):
+    def __call__(self, product_name, force_read=False, config_filename=None):
+        """Call the product config."""
         if force_read:
-            self.read_config()
-        return self._products[product_name]
+            self.read_config(config_filename)
+        if product_name in self._products:
+            return self._products[product_name]
+        else:
+            return {}
 
     @property
     def product_names(self):
+        """Get the product names."""
         return sorted(self._products.keys())
 
-    def read_config(self):
-        from ConfigParser import ConfigParser
+    def read_config(self, config_filename=None):
+        """Read the ninjo products config file."""
+        from six.moves.configparser import RawConfigParser
+        import ast
 
         def _eval(val):
             try:
-                return eval(val)
-            except:
+                return ast.literal_eval(val)
+            except (ValueError, SyntaxError):
                 return str(val)
 
-        filename = self._find_a_config_file()
+        if config_filename is not None:
+            filename = self._find_a_config_file(config_filename)
+        else:
+            filename = self._find_a_config_file('ninjotiff_products.cfg')
         log.info("Reading Ninjo config file: '%s'" % filename)
 
-        cfg = ConfigParser()
-        cfg.read(filename)
+        cfg = RawConfigParser()
         products = {}
-        for sec in cfg.sections():
-            prd = {}
-            for key, val in cfg.items(sec):
-                prd[key] = _eval(val)
-            products[sec] = prd
+        if filename is not None:
+            cfg.read(filename)
+            for sec in cfg.sections():
+                prd = {}
+                for key, val in cfg.items(sec):
+                    prd[key] = _eval(val)
+                products[sec] = prd
         self._products = products
 
     @staticmethod
-    def _find_a_config_file():
-        name_ = 'ninjotiff_products.cfg'
-        home_ = os.path.dirname(os.path.abspath(__file__))
-        penv_ = os.environ.get('PPP_CONFIG_DIR', '')
-        for fname_ in [os.path.join(x, name_) for x in (home_, penv_)]:
-            if os.path.isfile(fname_):
-                return fname_
-        raise ValueError("Could not find a Ninjo tiff config file")
+    def _find_a_config_file(fname):
+        # if config file (fname) is not found as absolute path: look for the
+        # config file in the PPP_CONFIG_DIR or current dir
+        name_ = os.path.abspath(os.path.expanduser(fname))
+        if os.path.isfile(name_):
+            return name_
+        else:
+            home_ = os.path.dirname(os.path.abspath(__file__))
+            penv_ = os.environ.get('PPP_CONFIG_DIR', '')
+            for fname_ in [os.path.join(x, name_) for x in (home_, penv_)]:
+                if os.path.isfile(fname_):
+                    return fname_
+        # raise ValueError("Could not find a Ninjo tiff config file")
 
 
-#-------------------------------------------------------------------------
+# -------------------------------------------------------------------------
 #
 # Write Ninjo Products
 #
-#-------------------------------------------------------------------------
+# -------------------------------------------------------------------------
 def _get_physic_value(physic_unit):
     # return Ninjo's physics unit and value.
     if physic_unit.upper() in ('K', 'KELVIN'):
@@ -282,9 +326,11 @@ def _get_satellite_altitude(filename):
     return None
 
 
-def _finalize(img, dtype=np.uint8, value_range_measurement_unit=None, data_is_scaled_01=True):
-    """Finalize a mpop GeoImage for Ninjo. Specialy take care of phycical scale
-    and offset.
+def _finalize(img, dtype=np.uint8, value_range_measurement_unit=None,
+              data_is_scaled_01=True, fill_value=None):
+    """Finalize a mpop GeoImage for Ninjo.
+
+    Specialy take care of phycical scale and offset.
 
     :Parameters:
         img : mpop.imageo.img.GeoImage
@@ -309,14 +355,34 @@ def _finalize(img, dtype=np.uint8, value_range_measurement_unit=None, data_is_sc
     **Notes**:
         physic_val = image*scale + offset
         Example values for value_range_measurement_unit are (0, 125) or (40.0, -87.5)
+
+    ***Warning***
+        Only the 'L' and 'RGB' cases are compatible with xarray.XRImage.
+        They still have to  be tested thoroughly.
     """
     if img.mode == 'L':
         # PFE: mpop.satout.cfscene
-        data = img.channels[0]
-        fill_value = np.iinfo(dtype).min
-        log.debug("Transparent pixel are forced to be %d" % fill_value)
+        if isinstance(img, np.ma.MaskedArray):
+            data = img.channels[0]
+        else:
+            # TODO: check what is the correct fill value for NinJo!
+            if fill_value is not None:
+                log.debug("Forcing fill value to %s", fill_value)
+            # Go back to the masked_array for compatibility
+            # with the following part of the code.
+            if (np.issubdtype(img.data[0].dtype, np.integer)
+                    and '_FillValue' in img.data[0].attrs):
+                nodata_value = img.data[0].attrs['_FillValue']
+                data = img.data[0].values
+                data = np.ma.array(data, mask=(data == nodata_value))
+            else:
+                data = img.data[0].to_masked_array()
+
+        fill_value = fill_value if fill_value is not None else np.iinfo(dtype).min
+
         log.debug("Before scaling: %.2f, %.2f, %.2f" %
                   (data.min(), data.mean(), data.max()))
+
         if np.ma.count_masked(data) == data.size:
             # All data is masked
             data = np.ones(data.shape, dtype=dtype) * fill_value
@@ -329,26 +395,20 @@ def _finalize(img, dtype=np.uint8, value_range_measurement_unit=None, data_is_sc
                 # value_range_measurement_unit[0] and 1.0 as
                 # value_range_measurement_unit[1]
 
-                # Make room for transparent pixel.
-                scale_fill_value = (
-                    (np.iinfo(dtype).max) / (np.iinfo(dtype).max + 1.0))
-                img = deepcopy(img)
-                img.channels[0] *= scale_fill_value
+                # Make room for the transparent pixel value.
+                data = data.clip(0, 1)
+                data *= (np.iinfo(dtype).max - 1)
+                data += 1
 
-                img.channels[0] += 1 / (np.iinfo(dtype).max + 1.0)
-
-                channels, fill_value = img._finalize(dtype)
-                data = channels[0]
-
-                scale = ((value_range_measurement_unit[1] -
-                          value_range_measurement_unit[0]) /
-                         (np.iinfo(dtype).max))
+                scale = ((value_range_measurement_unit[1]
+                          - value_range_measurement_unit[0])
+                         / (np.iinfo(dtype).max - 1))
                 # Handle the case where all data has the same value.
                 scale = scale or 1
                 offset = value_range_measurement_unit[0]
 
                 mask = data.mask
-
+                data = np.round(data.data).astype(dtype)
                 offset -= scale
 
                 if fill_value is None:
@@ -398,8 +458,17 @@ def _finalize(img, dtype=np.uint8, value_range_measurement_unit=None, data_is_sc
         return data, scale, offset, fill_value
 
     elif img.mode == 'RGB':
-        channels, fill_value = img._finalize(dtype)
-        if fill_value is None:
+        if isinstance(img, np.ma.MaskedArray):
+            channels, fill_value = img._finalize(dtype)
+        else:
+            data, mode = img.finalize(fill_value=fill_value, dtype=dtype)
+            # Go back to the masked_array for compatibility with
+            # the rest of the code.
+            channels = data.to_masked_array()
+            # Is this fill_value ok or what should it be?
+            fill_value = (0, 0, 0, 0)
+
+        if isinstance(img, np.ma.MaskedArray) and fill_value is None:
             mask = (np.ma.getmaskarray(channels[0]) &
                     np.ma.getmaskarray(channels[1]) &
                     np.ma.getmaskarray(channels[2]))
@@ -412,6 +481,8 @@ def _finalize(img, dtype=np.uint8, value_range_measurement_unit=None, data_is_sc
         return data, 1.0, 0.0, fill_value[0]
 
     elif img.mode == 'RGBA':
+        if not isinstance(img, np.ma.MaskedArray):
+            raise NotImplementedError("The 'RGBA' case has not been updated to xarray")
         channels, fill_value = img._finalize(dtype)
         fill_value = fill_value or (0, 0, 0, 0)
         data = np.dstack((channels[0].filled(fill_value[0]),
@@ -421,6 +492,8 @@ def _finalize(img, dtype=np.uint8, value_range_measurement_unit=None, data_is_sc
         return data, 1.0, 0.0, fill_value[0]
 
     elif img.mode == 'P':
+        if not isinstance(img, np.ma.MaskedArray):
+            raise NotImplementedError("The 'P' case has not been updated to xarray")
         fill_value = 0
         data = img.channels[0]
         if isinstance(data, np.ma.core.MaskedArray):
@@ -431,11 +504,11 @@ def _finalize(img, dtype=np.uint8, value_range_measurement_unit=None, data_is_sc
         return data, 1.0, 0.0, fill_value
 
     else:
-        raise ValueError("Don't known how til handle image mode '%s'" %
+        raise ValueError("Don't know how to handle image mode '%s'" %
                          str(img.mode))
 
 
-def save(img, filename, ninjo_product_name=None, writer_options=None,
+def save(img, filename, ninjo_product_name=None, writer_options=None, data_is_scaled_01=True,
          **kwargs):
     """Ninjo TIFF writer.
 
@@ -461,7 +534,6 @@ def save(img, filename, ninjo_product_name=None, writer_options=None,
         * min value will be reserved for transparent color.
         * If possible mpop.imageo.image's standard finalize will be used.
     """
-
     if writer_options:
         # add writer_options
         kwargs.update(writer_options)
@@ -474,21 +546,31 @@ def save(img, filename, ninjo_product_name=None, writer_options=None,
         if nbits == 16:
             dtype = np.uint16
 
+    fill_value = None
+    if 'fill_value' in kwargs and kwargs['fill_value'] is not None:
+        fill_value = int(kwargs['fill_value'])
+
     try:
         value_range_measurement_unit = (float(kwargs["ch_min_measurement_unit"]),
                                         float(kwargs["ch_max_measurement_unit"]))
     except KeyError:
         value_range_measurement_unit = None
 
-    data_is_scaled_01 = bool(kwargs.get("data_is_scaled_01", True))
+    # In case we are working on a trollimage.xrimage.XRImage,
+    # a conversion to the previously used masked_array is needed
 
     data, scale, offset, fill_value = _finalize(img,
                                                 dtype=dtype,
                                                 data_is_scaled_01=data_is_scaled_01,
-                                                value_range_measurement_unit=value_range_measurement_unit,)
+                                                value_range_measurement_unit=value_range_measurement_unit,
+                                                fill_value=fill_value,)
 
-    area_def = img.info['area']
-    time_slot = img.info['start_time']
+    if isinstance(img, np.ma.MaskedArray):
+        area_def = img.info['area']
+        time_slot = img.info['start_time']
+    else:
+        area_def = img.data.area
+        time_slot = img.data.start_time
 
     # Some Ninjo tiff names
     kwargs['gradient'] = scale
@@ -506,14 +588,13 @@ def save(img, filename, ninjo_product_name=None, writer_options=None,
             g += [0] * (256 - len(g))
             b += [0] * (256 - len(b))
         kwargs['cmap'] = r, g, b
-
     write(data, filename, area_def, ninjo_product_name, **kwargs)
 
 
 def write(image_data, output_fn, area_def, product_name=None, **kwargs):
-    """Generic Ninjo TIFF writer.
+    """Write a Generic Ninjo TIFF.
 
-    If 'prodcut_name' is given, it will load corresponding Ninjo tiff metadata
+    If 'product_name' is given, it will load corresponding Ninjo tiff metadata
     from '${PPP_CONFIG_DIR}/ninjotiff.cfg'. Else, all Ninjo tiff metadata should
     be passed by '**kwargs'. A mixture is allowed, where passed arguments
     overwrite config file.
@@ -532,9 +613,7 @@ def write(image_data, output_fn, area_def, product_name=None, **kwargs):
         kwargs : dict
             See _write
     """
-    
-
-    proj  = Proj(area_def.proj_dict) 
+    proj = Proj(area_def.proj_dict)
     upper_left = proj(
         area_def.area_extent[0],
         area_def.area_extent[3],
@@ -542,8 +621,8 @@ def write(image_data, output_fn, area_def, product_name=None, **kwargs):
     lower_right = proj(
         area_def.area_extent[2],
         area_def.area_extent[1],
-        inverse=True)    
- 
+        inverse=True)
+
     if len(image_data.shape) == 3:
         if image_data.shape[2] == 4:
             shape = (area_def.y_size, area_def.x_size, 4)
@@ -586,7 +665,11 @@ def write(image_data, output_fn, area_def, product_name=None, **kwargs):
         kwargs['altitude'] = altitude
 
     if product_name:
-        options = deepcopy(get_product_config(product_name))
+        # If ninjo_product_file in kwargs, load ninjo_product_file as config file
+        if 'ninjo_product_file' in kwargs:
+            options = deepcopy(get_product_config(product_name, True, kwargs['ninjo_product_file']))
+        else:
+            options = deepcopy(get_product_config(product_name))
     else:
         options = {}
 
@@ -602,9 +685,8 @@ def write(image_data, output_fn, area_def, product_name=None, **kwargs):
             options['ref_lat2'] = 0
     if 'lon_0' in area_def.proj_dict:
         options['central_meridian'] = area_def.proj_dict['lon_0']
-	
 
-    a,b = proj4_radius_parameters(area_def.proj_dict)
+    a, b = proj4_radius_parameters(area_def.proj_dict)
     options['radius_a'] = a
     options['radius_b'] = b
     options['origin_lon'] = upper_left[0]
@@ -622,11 +704,12 @@ def write(image_data, output_fn, area_def, product_name=None, **kwargs):
 #
 # -----------------------------------------------------------------------------
 def _write(image_data, output_fn, write_rgb=False, **kwargs):
-    """Proudly Found Elsewhere (PFE) https://github.com/davidh-ssec/polar2grid
+    """Create a NinJo compatible TIFF file.
+
+    Proudly Found Elsewhere (PFE) https://github.com/davidh-ssec/polar2grid
     by David Hoese.
 
-    Create a NinJo compatible TIFF file with the tags used
-    by the DWD's version of NinJo.  Also stores the image as tiles on disk
+    Also stores the image as tiles on disk
     and creates a multi-resolution/pyramid/overview set of images
     (deresolution: 2,4,8,16).
 
@@ -770,6 +853,7 @@ def _write(image_data, output_fn, write_rgb=False, **kwargs):
     origin_lat = float(kwargs.pop("origin_lat"))
     origin_lon = float(kwargs.pop("origin_lon"))
     image_dt = kwargs.pop("image_dt")
+    zero_seconds = kwargs.pop("zero_seconds", False)
     projection = str(kwargs.pop("projection"))
     meridian_west = float(kwargs.pop("meridian_west", 0.0))
     meridian_east = float(kwargs.pop("meridian_east", 0.0))
@@ -843,7 +927,13 @@ def _write(image_data, output_fn, write_rgb=False, **kwargs):
 
     file_dt = datetime.utcnow()
     file_epoch = calendar.timegm(file_dt.timetuple())
-    image_epoch = calendar.timegm(image_dt.timetuple())
+    if zero_seconds:
+        log.debug("Applying zero seconds correction")
+        image_dt_corr = datetime(image_dt.year, image_dt.month, image_dt.day,
+                                 image_dt.hour, image_dt.minute)
+    else:
+        image_dt_corr = image_dt
+    image_epoch = calendar.timegm(image_dt_corr.timetuple())
 
     compression = _eval_or_default("compression", int, 6)
 
@@ -1045,6 +1135,7 @@ def read_tags(filename):
                 tags[name] = value
             pages.append(tags)
     return pages
+
 
 if __name__ == '__main__':
     import sys
